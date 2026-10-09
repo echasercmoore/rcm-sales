@@ -265,7 +265,7 @@ padding:5px 10px;cursor:pointer;white-space:nowrap;justify-self:end;transition:b
       <span class="live-dot pending" id="liveDot"></span>
       <span class="live-text" id="liveText">Connecting to Google Sheet…</span>
       <button class="btn" id="refreshBtn" title="Re-fetch the latest data from Google Sheets" style="padding:7px 12px;font-size:11.5px">&#8635; Refresh</button>
-      <span class="chip-build">BUILD 26 &middot; 4 SEP</span>
+      <span class="chip-build">BUILD 28 &middot; 10 SEP</span>
     </div>
   </div>
 </header>
@@ -369,7 +369,7 @@ padding:5px 10px;cursor:pointer;white-space:nowrap;justify-self:end;transition:b
     </div>
 
     <div class="footer-note">
-      <span>Source: Sales Data — Raw Data tab, <span id="rowCount">—</span> shipment records</span>
+      <span>Source: Sales Data — Raw Data tab, <span id="rowCount">—</span> shipment records<span id="exclNote"></span></span>
       <span id="scopeNote"></span>
     </div>
   </section>
@@ -501,6 +501,8 @@ const SHEET_ID = '1N7Pkd9Za59B5PHsKlWJJHrTO6X-28DfkTmAeqwrVjIQ';
 const TAB_RAW_DATA = 'Raw Data';
 const TAB_NEW_BUSINESS = 'New Business';
 const TAB_NEW_CUSTOMERS = 'New Customers';
+const TAB_NEW_LANES = 'New Lanes';
+const LANE_SEED = [["PEPSI", "AYER", "MA", "ALLENTOWN", "PA"], ["PEPSI", "AYER", "MA", "CLAYMONT", "DE"], ["PEPSI", "AYER", "MA", "JOHNSTOWN", "PA"], ["PEPSI", "AYER", "MA", "NORFOLK", "VA"], ["PEPSI", "AYER", "MA", "PITTSTON", "PA"], ["PEPSI", "AYER", "MA", "RIVER CITY / RICHMOND", "VA"], ["PEPSI", "CARLISLE", "PA", "WINTHROP", "ME"], ["PEPSI", "LITTLETON", "MA", "HANOVER TOWNSHIP", "PA"], ["PEPSI", "LITTLETON", "MA", "MOUNTAIN TOP", "PA"], ["PEPSI", "OLYPHANT", "PA", "AYER", "MA"], ["PEPSI", "PITTSTON", "PA", "HANOVER TOWNSHIP", "PA"], ["PEPSI", "PITTSTON", "PA", "MOUNTAIN TOP", "PA"], ["BLUE TRITON BRANDS", "ANY", "TX", "ANY", "ANY"], ["BLUE TRITON BRANDS", "ANY", "AR", "ANY", "ANY"], ["BLUE TRITON BRANDS", "TOBYHANNA", "PA", "ANY", "ANY"], ["BLUE TRITON BRANDS", "BREINIGSVILLE", "PA", "ANY", "ANY"]];
 const gvizCsvUrl = tab =>
   `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(tab)}`;
 
@@ -517,20 +519,98 @@ const NORM = {'ADIDAS AMERICA':'Adidas','LIQUOR BOTTLE PACKAGING INTERNATIONAL':
    BlueTriton / Primo: any origin in TX or AR, or origin Tobyhanna PA.
    Pepsi: twelve named city-to-city lanes.
    Every other tracked client: all of their loads count as new business. */
-const PEPSI_LANES = new Set([
- 'AYER|MA|ALLENTOWN|PA','AYER|MA|CLAYMONT|DE','AYER|MA|JOHNSTOWN|PA','AYER|MA|NORFOLK|VA',
- 'AYER|MA|PITTSTON|PA','AYER|MA|RIVER CITY / RICHMOND|VA','AYER|MA|RICHMOND|VA',
- 'CARLISLE|PA|WINTHROP|ME','LITTLETON|MA|HANOVER TOWNSHIP|PA','LITTLETON|MA|MOUNTAIN TOP|PA',
- 'OLYPHANT|PA|AYER|MA','PITTSTON|PA|HANOVER TOWNSHIP|PA','PITTSTON|PA|MOUNTAIN TOP|PA']);
-/* Lane eligibility. BlueTriton and Pepsi only count on their New Lanes;
-   every other customer is unrestricted. Off-lane shipments are dropped
-   from the dataset entirely, so the live sheet matches the cached extract. */
-function onNewLane(cust, oc, ost, dc, dst){
-  if(cust === 'BlueTriton Brands') return ost==='TX' || ost==='AR' || (oc==='TOBYHANNA' && ost==='PA');
-  if(cust === 'Pepsi / Quaker / Gatorade') return PEPSI_LANES.has(`${oc}|${ost}|${dc}|${dst}`);
-  return true;
+/* Lane rules come from the sheet's "New Lanes" tab, not from code. Each row is
+   customer + origin city/state + destination city/state, where "Any" (or a
+   blank) is a wildcard. A customer named on the tab only counts on its listed
+   lanes; a customer with no rows there is unrestricted. */
+let LANE_RULES = {};
+let LANES_SRC = 'snapshot';
+
+const squash = v => String(v||'').toUpperCase().replace(/[^A-Z0-9]/g,'');
+
+/* Internal, non-customer accounts. RCM Warehouse is inter-facility shuttle
+   freight billed at $0 with real carrier cost, so it books a pure loss and
+   isn't sales activity. Dropped from the dataset on both the cached and the
+   live path, and reported in the footer so the exclusion stays visible. */
+const EXCLUDED_ACCOUNTS = ['RCM Warehouse'];
+const EXCLUDED_KEYS = new Set(EXCLUDED_ACCOUNTS.map(squash));
+const isExcluded = name => EXCLUDED_KEYS.has(squash(name));
+let EXCLUDED_COUNT = 0;
+/* Map a name from the Lane column onto the customer as it appears in shipment
+   data — handles PEPSI -> Pepsi / Quaker / Gatorade, Blue Triton Brands ->
+   BlueTriton Brands, and anything else that differs only by case or spacing. */
+function matchCustomer(raw){
+  const direct = NORM[String(raw||'').trim()];
+  if(direct) return direct;
+  const key = squash(raw);
+  if(!key) return null;
+  let pool; try { pool = DATA ? DATA.customers : CACHE.customers; } catch(e) { pool = CACHE.customers; }
+  let hit = pool.find(c=>squash(c)===key);
+  if(hit) return hit;
+  for(const k in NORM){ if(squash(k)===key) return NORM[k]; }
+  hit = pool.find(c=>squash(c).startsWith(key) || key.startsWith(squash(c)));
+  return hit || null;
+}
+const WILD = v => { const t=String(v||'').trim().toUpperCase(); return t===''||t==='ANY'||t==='-'; };
+
+function buildLaneRules(rowsIn){
+  const out={};
+  rowsIn.forEach(r=>{
+    const cust = matchCustomer(r[0]);
+    if(!cust) return;
+    (out[cust]=out[cust]||[]).push({
+      oc: WILD(r[1])?null:String(r[1]).trim().toUpperCase(),
+      os: WILD(r[2])?null:String(r[2]).trim().toUpperCase(),
+      dc: WILD(r[3])?null:String(r[3]).trim().toUpperCase(),
+      ds: WILD(r[4])?null:String(r[4]).trim().toUpperCase()});
+  });
+  return out;
+}
+function onNewLane(cust, oc, os, dc, ds){
+  if(!Object.keys(LANE_RULES).length) LANE_RULES = buildLaneRules(LANE_SEED);
+  const rules = LANE_RULES[cust];
+  if(!rules || !rules.length) return true;          // unrestricted customer
+  return rules.some(x =>
+    (x.oc===null || x.oc===oc) && (x.os===null || x.os===os) &&
+    (x.dc===null || x.dc===dc) && (x.ds===null || x.ds===ds));
 }
 function isNewBusiness(cust){ return TRACKED.has(cust); }
+
+/* "City, ST" -> ["CITY","ST"], for applying lane rules to stored rows */
+function splitCity(lbl){
+  const i = String(lbl||'').lastIndexOf(',');
+  return i<0 ? [String(lbl||'').trim().toUpperCase(),''] 
+             : [lbl.slice(0,i).trim().toUpperCase(), lbl.slice(i+1).trim().toUpperCase()];
+}
+function recomputeLanes(){
+  if(!DATA) return;
+  DATA.rows.forEach(r=>{
+    const [oc,os]=splitCity(DATA.cities[r.o]), [dc,ds]=splitCity(DATA.cities[r.d]);
+    r.ln = onNewLane(DATA.customers[r.c], oc, os, dc, ds) ? 1 : 0;
+  });
+}
+async function loadLanes(){
+  try{
+    const res = await fetch(gvizCsvUrl(TAB_NEW_LANES),{cache:'no-store'});
+    if(!res.ok) throw new Error('HTTP '+res.status);
+    const parsed = Papa.parse(await res.text(),{header:true,skipEmptyLines:true}).data;
+    const pick = (row,...names)=>{ const k=Object.keys(row).find(h=>{
+      const t=h.trim().toLowerCase(); return names.some(n=>t===n||t.startsWith(n)); }); return k?row[k]:''; };
+    const rowsIn = parsed.map(row=>[
+      pick(row,'lane','customer'),
+      pick(row,'origin city'), pick(row,'origin state'),
+      pick(row,'destination city'), pick(row,'destination state')
+    ]).filter(r=>String(r[0]||'').trim());
+    if(!rowsIn.length) throw new Error('no lane rows');
+    LANE_RULES = buildLaneRules(rowsIn);
+    LANES_SRC = 'live';
+  }catch(err){
+    console.warn('New Lanes tab unreachable, using embedded rules:', err);
+    LANE_RULES = buildLaneRules(LANE_SEED);
+    LANES_SRC = 'snapshot';
+  }
+  recomputeLanes();
+}
 
 const $ = s => document.querySelector(s);
 const $$ = s => Array.from(document.querySelectorAll(s));
@@ -550,10 +630,13 @@ const DASH = '<span class="dim">—</span>';
 let DATA = null;
 
 function fromCache(){
+  EXCLUDED_COUNT = CACHE.rows.filter(r=>isExcluded(CACHE.customers[r[0]])).length;
   return {customers:CACHE.customers, months:CACHE.months,
     cities:CACHE.cities,
-    rows:CACHE.rows.map(r=>({c:r[0],rcm:r[1],m:r[2],rev:r[3]/100,pay:r[4]/100,mgn:r[5]/100,
-      corp: r[6]===null ? null : r[6]/100, mi:r[7], nw:r[8], ok:r[9], o:r[10], d:r[11], ln:r[12]}))};
+    rows:CACHE.rows
+      .filter(r=>!isExcluded(CACHE.customers[r[0]]))
+      .map(r=>({c:r[0],rcm:r[1],m:r[2],rev:r[3]/100,pay:r[4]/100,mgn:r[5]/100,
+        corp: r[6]===null ? null : r[6]/100, mi:r[7], nw:r[8], ok:r[9], o:r[10], d:r[11], ln:r[12]}))};
 }
 
 function toNum(v){
@@ -576,6 +659,7 @@ function parseSheetMonth(v){
   return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0');
 }
 function fromSheet(raw){
+  EXCLUDED_COUNT = 0;
   const customers=[], cities=[], monthSet=new Set(), tmp=[];
   const enc = v => { if(!customers.includes(v)) customers.push(v); return customers.indexOf(v); };
   const encCity = v => { if(!cities.includes(v)) cities.push(v); return cities.indexOf(v); };
@@ -586,6 +670,7 @@ function fromSheet(raw){
     if(rev===undefined || String(rev).trim()==='') return;
     const rawCust = String(row['Customer']||'').trim();
     if(!rawCust) return;
+    if(isExcluded(rawCust)){ EXCLUDED_COUNT++; return; }
     const cust = NORM[rawCust] || rawCust;
     const id = parseInt(String(row['Shipment ID']).replace(/[^0-9]/g,''),10);
     /* Asset only when R.C. Moore's own fleet hauled it. Group Name is the
@@ -644,9 +729,12 @@ async function loadData(){
     setLive('error','<b>Cached extract</b> — live sheet unreachable');
     showBanner('error',`Couldn't reach the live Google Sheet (${err.message}). Showing the cached extract of ${fmtNum(DATA.rows.length)} records instead. Click Refresh to retry.`);
   }finally{
+    await loadLanes();
     await loadNewCustomers();
     await loadPipeline();
     $('#refreshBtn').disabled = false;
+    if(!Object.keys(LANE_RULES).length) LANE_RULES = buildLaneRules(LANE_SEED);
+    recomputeLanes();
     buildOptions(); renderAll();
   }
 }
@@ -805,6 +893,8 @@ function renderOverall(){
     ? fmt$k(t.corp)+' \u00F7 '+fmt$k(t.bRev)+' brokered rev'
     : 'no brokered loads in scope';
   $('#rowCount').textContent = fmtNum(DATA.rows.length);
+  $('#exclNote').innerHTML = EXCLUDED_COUNT
+    ? ` \u00B7 <span class="faint">${fmtNum(EXCLUDED_COUNT)} internal ${EXCLUDED_ACCOUNTS.join(', ')} shuttle loads excluded</span>` : '';
 
   const sp = series.slice(-10);
   mkSpark('spRev', sp.map(s=>s.rev), '#D9A521');
@@ -1019,7 +1109,8 @@ function renderScopeBar(){
   const total = DATA.rows.filter(inBiz).length;
   el.innerHTML = state.biz==='new'
     ? `<b>New Business \u2014 ${fmtNum(rows.length)} shipments from ${fmtNum(SELECTED.size)} new clients.</b> `
-      + `The customers on the <b>New Customers</b> tab, with BlueTriton and Pepsi limited to the lanes named on the New Lanes tab. `
+      + `Customers from the <b>New Customers</b> tab; those named on <b>New Lanes</b> count only on their listed lanes `
+      + `(${Object.keys(LANE_RULES).length} lane-restricted, ${LANES_SRC==='live'?'read from the sheet':'embedded rules'}). `
     : `<b>All Business \u2014 ${fmtNum(rows.length)} shipments from ${fmtNum(SELECTED.size)} of ${fmtNum(DATA.customers.length)} customers.</b> `
       + `Every customer and shipment, no lane restrictions. ${fmtNum(nw)} of these loads qualify as new business (${fmtNum(NEWSET.size)} customers). `;
   el.innerHTML += (undated ? `<b>${fmtNum(undated)} (${fmtPct(undated/Math.max(rows.length,1))}) have no readable date</b> \u2014 all four date columns export as ##### from the sheet, so they count in the KPI cards and tables but cannot appear in the monthly view.` : '');
@@ -1326,6 +1417,7 @@ function renderSelect(){
   const scopeCust = new Set(DATA.rows.filter(inBiz).map(r=>r.c));
   const list = DATA.customers.map((name,i)=>({name,i,n:(stats[i]||{}).n||0,rev:(stats[i]||{}).rev||0,
       inScope:scopeCust.has(i)}))
+    .filter(c=>!isExcluded(c.name) && c.n>0)
     .filter(c=>!q || c.name.toLowerCase().includes(q))
     .sort((a,b)=>b.n-a.n || b.rev-a.rev);
   const head = `<div class="cust-head"><span></span><span>Customer</span>
@@ -1349,7 +1441,8 @@ function renderSelect(){
   $('#selNote').innerHTML = `<b>${fmtNum(SELECTED.size)} of ${fmtNum(scopeCust.size)} customers included</b>`
     + ` \u2014 ${fmt$(inRev)} of revenue \u00B7 <b>${fmtNum(NEWSET.size)}</b> in the new-business group`
     + (NEWSET.size!==NEWSET_SEED.size ? ` <span class="chip chip-gold">edited</span>` : '')
-    + (NEWSET_SRC==='live' ? ` <span class="chip chip-green">from sheet</span>` : ` <span class="chip chip-silver">embedded list</span>`)
+    + (NEWSET_SRC==='live' ? ` <span class="chip chip-green">customers from sheet</span>` : ` <span class="chip chip-silver">embedded list</span>`)
+    + (LANES_SRC==='live' ? ` <span class="chip chip-green">lanes from sheet</span>` : ` <span class="chip chip-silver">embedded lanes</span>`)
     + (pending.length ? `<div class="faint" style="margin-top:6px">Awaiting first shipment: ${pending.map(esc).join(' \u00B7 ')}</div>` : '');
 }
 $('#custGrid').addEventListener('change', e=>{
@@ -1377,7 +1470,7 @@ $('#selActions').addEventListener('click', e=>{
   if(mode==='all') DATA.customers.forEach((_,i)=>SELECTED.add(i));
   if(mode==='new') DATA.customers.forEach((c,i)=>{ if(NEWSET.has(c)) SELECTED.add(i); });
   if(mode==='reload'){
-    loadNewCustomers().then(()=>{
+    Promise.all([loadLanes(), loadNewCustomers()]).then(()=>{
       SELECTED.clear();
       DATA.customers.forEach((c,i)=>{ if(state.biz==='all' || NEWSET.has(c)) SELECTED.add(i); });
       EXPANDED.clear(); renderAll();
