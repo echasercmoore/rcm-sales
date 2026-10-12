@@ -61,7 +61,8 @@ canvas{display:block;max-width:100%}
 .load-banner.err{background:var(--red-soft);border-bottom:1px solid rgba(186,15,36,.3)}
 .load-banner-inner{max-width:1520px;margin:0 auto;padding:10px 28px;font-size:12.5px;color:var(--silver);display:flex;align-items:center;gap:8px}
 
-.controls{max-width:1520px;margin:0 auto;padding:18px 28px 0;display:flex;align-items:flex-end;gap:12px;flex-wrap:wrap;position:relative;z-index:1}
+/* Above main (z-index:1) so the Period panel overlays the KPI cards. */
+.controls{max-width:1520px;margin:0 auto;padding:18px 28px 0;display:flex;align-items:flex-end;gap:12px;flex-wrap:wrap;position:relative;z-index:90}
 .page-h{margin-right:auto}
 .page-h h1{font-size:22px;font-weight:800;letter-spacing:-.01em}
 .page-h p{font-size:12px;color:var(--silver-dim);margin-top:2px}
@@ -291,7 +292,7 @@ padding:5px 10px;cursor:pointer;white-space:nowrap;justify-self:end;transition:b
       <span class="live-dot pending" id="liveDot"></span>
       <span class="live-text" id="liveText">Connecting to Google Sheet…</span>
       <button class="btn" id="refreshBtn" title="Re-fetch the latest data from Google Sheets" style="padding:7px 12px;font-size:11.5px">&#8635; Refresh</button>
-      <span class="chip-build">BUILD 29 &middot; 12 OCT</span>
+      <span class="chip-build">BUILD 30 &middot; 12 OCT</span>
     </div>
   </div>
 </header>
@@ -669,10 +670,12 @@ let DATA = null;
 
 function fromCache(){
   EXCLUDED_COUNT = CACHE.rows.filter(r=>isExcluded(CACHE.customers[r[0]])).length;
-  return {customers:CACHE.customers, months:CACHE.months,
+  PRE_FLOOR_COUNT = CACHE.rows.filter(r=>r[2]>=0 && CACHE.months[r[2]] < PERIOD_FLOOR).length;
+  return {customers:CACHE.customers, months:CACHE.months.filter(m=>m>=PERIOD_FLOOR),
     cities:CACHE.cities,
     rows:CACHE.rows
       .filter(r=>!isExcluded(CACHE.customers[r[0]]))
+      .filter(r=>r[2]<0 || CACHE.months[r[2]] >= PERIOD_FLOOR)
       .map(r=>({c:r[0],rcm:r[1],m:r[2],rev:r[3]/100,pay:r[4]/100,mgn:r[5]/100,
         corp: r[6]===null ? null : r[6]/100, mi:r[7], nw:r[8], ok:r[9], o:r[10], d:r[11], ln:r[12]}))};
 }
@@ -701,7 +704,7 @@ function parseSheetMonth(v){
   return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0');
 }
 function fromSheet(raw){
-  EXCLUDED_COUNT = 0;
+  EXCLUDED_COUNT = 0; PRE_FLOOR_COUNT = 0;
   const customers=[], cities=[], monthSet=new Set(), tmp=[];
   const enc = v => { if(!customers.includes(v)) customers.push(v); return customers.indexOf(v); };
   const encCity = v => { if(!cities.includes(v)) cities.push(v); return cities.indexOf(v); };
@@ -724,6 +727,7 @@ function fromSheet(raw){
           DC=U(row['Destination City']), DS=U(row['Destination State']);
     const mo = parseSheetMonth(row['Pickup Actual Arrival']) || parseSheetMonth(row['Pickup Actual Departed'])
             || parseSheetMonth(row['Delivery Actual Arrival']) || parseSheetMonth(row['Delivery Actual Departed']);
+    if(mo && mo < PERIOD_FLOOR){ PRE_FLOOR_COUNT++; return; }   // pre-Oct-2024: not real history
     if(mo) monthSet.add(mo);
     tmp.push({c:enc(cust), rcm, mo,
       rev:toNum(rev), pay:toNum(row['Carrier Pay']), mgn:toNum(row['Margin Revenue']),
@@ -735,7 +739,7 @@ function fromSheet(raw){
       d: encCity(cityLbl(DC, DS)),
       ok: String(row['Status']||'').trim()==='Completed' ? 1 : 0});
   });
-  const months = Array.from(monthSet).sort();
+  const months = Array.from(monthSet).filter(m=>m>=PERIOD_FLOOR).sort();
   const mIdx = Object.fromEntries(months.map((m,i)=>[m,i]));
   return {customers, cities, months,
     rows: tmp.map(r=>({c:r.c,rcm:r.rcm,m:r.mo?(mIdx[r.mo]??-1):-1,rev:r.rev,pay:r.pay,mgn:r.mgn,
@@ -799,6 +803,10 @@ document.querySelector('.biz-toggle').addEventListener('click', e=>{
 const state = {type:'All', status:'All', biz:'all'};
 /* Selected periods as 'YYYY-MM'. Empty means no restriction (all periods). */
 const MONTHS_SEL = new Set();
+/* Real history starts Oct 2024. Anything parsing earlier is a bad date in
+   the sheet, so the row is dropped rather than charted as a stray period. */
+const PERIOD_FLOOR = '2024-10';
+let PRE_FLOOR_COUNT = 0;
 const SELECTED = new Set();                               // filled once data loads (all on)
 const EXPANDED = new Set();                               // open drill-down rows
 let DRILL_SEEDED = false;                                 // open newest month once, on first paint
@@ -938,6 +946,8 @@ function renderOverall(){
   $('#rowCount').textContent = fmtNum(DATA.rows.length);
   $('#exclNote').innerHTML = EXCLUDED_COUNT
     ? ` \u00B7 <span class="faint">${fmtNum(EXCLUDED_COUNT)} internal ${EXCLUDED_ACCOUNTS.join(', ')} shuttle loads excluded</span>` : '';
+  if(PRE_FLOOR_COUNT) $('#exclNote').innerHTML +=
+    ` \u00B7 <span class="faint">${fmtNum(PRE_FLOOR_COUNT)} shipments dated before ${monthLabel(PERIOD_FLOOR)} excluded</span>`;
 
   const sp = series.slice(-10);
   mkSpark('spRev', sp.map(s=>s.rev), '#D9A521');
@@ -1056,7 +1066,8 @@ function renderOverall(){
       <td class="r num">${t.brokPct===null?DASH:fmtPct(t.brokPct)}<div class="faint" style="font-weight:400">on ${fmt$k(t.bRev)} brokered</div></td></tr>`;
 
   const parts=[];
-  if(state.cust!=='All') parts.push('Customer: '+state.cust);
+  if(SELECTED.size && SELECTED.size < DATA.customers.length)
+    parts.push(fmtNum(SELECTED.size)+' of '+fmtNum(DATA.customers.length)+' customers');
   if(state.type!=='All') parts.push('Type: '+(state.type==='RCM'?'Asset':'Brokered'));
   if(MONTHS_SEL.size) parts.push('Period: '+periodLabel());
   if(state.status!=='All') parts.push('Completed only');
