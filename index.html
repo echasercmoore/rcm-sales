@@ -243,6 +243,32 @@ padding:5px 10px;cursor:pointer;white-space:nowrap;justify-self:end;transition:b
 .nb-btn:hover{border-color:var(--gold);color:var(--gold-bright)}
 .nb-btn.on{background:var(--gold-soft);border-color:var(--gold);color:var(--gold-bright);font-weight:700}
 .nb-btn:focus-visible{outline:2px solid var(--gold-bright);outline-offset:2px}
+.ms{position:relative}
+.ms-btn{background:var(--midnight-2);border:1px solid var(--line);color:var(--silver);
+  font-family:var(--font-body);font-size:13px;font-weight:600;padding:9px 12px;border-radius:8px;
+  cursor:pointer;min-width:172px;text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ms-btn:hover{border-color:var(--gold)}
+.ms-btn:after{content:"\25BE";float:right;color:var(--silver-faint);margin-left:8px}
+.ms-btn.on{border-color:var(--gold);color:var(--gold-bright)}
+.ms-panel{position:absolute;top:calc(100% + 5px);left:0;z-index:60;min-width:236px;max-height:340px;
+  overflow-y:auto;background:var(--midnight);border:1px solid var(--gold);border-radius:8px;
+  padding:8px;box-shadow:0 10px 30px rgba(0,0,0,.5)}
+.ms-head{display:flex;gap:5px;margin-bottom:7px;padding-bottom:7px;border-bottom:1px solid var(--line)}
+.ms-mini{flex:1;background:var(--midnight-2);border:1px solid var(--line);color:var(--silver-dim);
+  font-family:var(--font-label);font-size:8px;letter-spacing:.07em;text-transform:uppercase;
+  padding:5px 4px;border-radius:5px;cursor:pointer;white-space:nowrap}
+.ms-mini:hover{border-color:var(--gold);color:var(--gold-bright)}
+.ms-yr{display:flex;align-items:center;gap:7px;padding:6px;border-radius:5px;cursor:pointer;font-weight:700;font-size:13px}
+.ms-yr:hover{background:rgba(184,134,11,.08)}
+.ms-yr .cnt{margin-left:auto;font-size:10.5px;color:var(--silver-faint);font-variant-numeric:tabular-nums}
+.ms-car{width:13px;color:var(--gold-bright);font-size:9px;transition:transform .15s;display:inline-block}
+.ms-yr.open .ms-car{transform:rotate(90deg)}
+.ms-mo{display:none;padding-left:21px}
+.ms-yr.open + .ms-mo{display:block}
+.ms-mo label{display:flex;align-items:center;gap:7px;padding:4px 6px;border-radius:5px;cursor:pointer;font-size:12.5px;color:var(--silver-dim)}
+.ms-mo label:hover{background:rgba(184,134,11,.08);color:var(--silver)}
+.ms-panel input[type=checkbox]{accent-color:var(--gold-bright);width:14px;height:14px;cursor:pointer;flex:none}
+@media(max-width:760px){.ms-btn{width:100%}.ms-panel{width:100%}}
 </style></head>
 <body>
 
@@ -265,7 +291,7 @@ padding:5px 10px;cursor:pointer;white-space:nowrap;justify-self:end;transition:b
       <span class="live-dot pending" id="liveDot"></span>
       <span class="live-text" id="liveText">Connecting to Google Sheet…</span>
       <button class="btn" id="refreshBtn" title="Re-fetch the latest data from Google Sheets" style="padding:7px 12px;font-size:11.5px">&#8635; Refresh</button>
-      <span class="chip-build">BUILD 28 &middot; 10 SEP</span>
+      <span class="chip-build">BUILD 29 &middot; 12 OCT</span>
     </div>
   </div>
 </header>
@@ -284,7 +310,19 @@ padding:5px 10px;cursor:pointer;white-space:nowrap;justify-self:end;transition:b
   </div>
   <div class="filter-group"><label for="fType">Load Type</label><select id="fType">
     <option value="All">All loads</option><option value="RCM">Asset (RCM)</option><option value="NS">Brokered (NS)</option></select></div>
-  <div class="filter-group"><label for="fMonth">Month</label><select id="fMonth"></select></div>
+  <div class="filter-group"><label for="msBtn">Period</label>
+    <div class="ms">
+      <button type="button" class="ms-btn" id="msBtn" aria-haspopup="true" aria-expanded="false">All periods</button>
+      <div class="ms-panel hide" id="msPanel">
+        <div class="ms-head">
+          <button type="button" class="ms-mini" data-ms="all">Select all</button>
+          <button type="button" class="ms-mini" data-ms="none">Clear</button>
+          <button type="button" class="ms-mini" data-ms="latest">Latest year</button>
+        </div>
+        <div class="ms-tree" id="msTree"></div>
+      </div>
+    </div>
+  </div>
   <div class="filter-group"><label for="fStatus">Status</label><select id="fStatus">
     <option value="All">All statuses</option><option value="Completed">Completed only</option></select></div>
   <button class="btn btn-reset" id="resetBtn">Reset filters</button>
@@ -655,7 +693,11 @@ function parseSheetMonth(v){
   if(m){ const mi = MN.findIndex(x=>x.toLowerCase()===m[2].toLowerCase());
     if(mi>=0) d = new Date(2000+ +m[3], mi, +m[1]); }
   if(!d){ const t = new Date(s); if(!isNaN(t.getTime())) d = t; }
-  if(!d || isNaN(d.getTime()) || d.getFullYear() < 2026) return null;
+  /* Accept any plausible shipment year. The old floor of 2026 silently
+     discarded the 2024-25 history when it was added to Raw Data. */
+  if(!d || isNaN(d.getTime())) return null;
+  const yr = d.getFullYear();
+  if(yr < 2015 || yr > new Date().getFullYear()+2) return null;
   return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0');
 }
 function fromSheet(raw){
@@ -754,15 +796,16 @@ document.querySelector('.biz-toggle').addEventListener('click', e=>{
 });
 
 /* ================= FILTERS ================= */
-const state = {type:'All', month:'All', status:'All', biz:'all'};
+const state = {type:'All', status:'All', biz:'all'};
+/* Selected periods as 'YYYY-MM'. Empty means no restriction (all periods). */
+const MONTHS_SEL = new Set();
 const SELECTED = new Set();                               // filled once data loads (all on)
 const EXPANDED = new Set();                               // open drill-down rows
 let DRILL_SEEDED = false;                                 // open newest month once, on first paint
 
 function buildOptions(){
-  $('#fMonth').innerHTML = ['All',...DATA.months].map(m=>`<option value="${m}">${m==='All'?'All months':monthLabel(m)}</option>`).join('');
-  if(!DATA.months.includes(state.month)) state.month='All';
-  $('#fMonth').value = state.month;
+  [...MONTHS_SEL].forEach(m=>{ if(!DATA.months.includes(m)) MONTHS_SEL.delete(m); });
+  renderPeriodPicker();
   DATA.customers.forEach((_,i)=>SELECTED.add(i));
 }
 /* 'new' = the 15 new clients, and for BlueTriton and Pepsi only their New
@@ -775,7 +818,7 @@ function filtered(){
     if(!SELECTED.has(r.c)) return false;
     if(state.type==='RCM' && r.rcm!==1) return false;
     if(state.type==='NS' && r.rcm!==0) return false;
-    if(state.month!=='All' && (r.m<0 || DATA.months[r.m]!==state.month)) return false;
+    if(MONTHS_SEL.size && (r.m<0 || !MONTHS_SEL.has(DATA.months[r.m]))) return false;
     if(state.status==='Completed' && r.ok!==1) return false;
     return true;
   });
@@ -915,9 +958,15 @@ function renderOverall(){
 
   /* ---------- monthly chart ---------- */
   const laneOf = r => (DATA.cities?DATA.cities[r.o]:'—') + '  \u2192  ' + (DATA.cities?DATA.cities[r.d]:'—');
-  $('#monthNote').textContent = series.length ? series.length + ' months shown' : '';
+  $('#monthNote').textContent = series.length
+    ? series.length + ' month' + (series.length===1?'':'s') + ' shown'
+      + (series.length>1 ? ' \u00B7 ' + monthLabel(series[0].m) + ' \u2013 ' + monthLabel(series[series.length-1].m) : '')
+      + (MONTHS_SEL.size ? ' \u00B7 filtered to ' + periodLabel() : '')
+    : 'No dated shipments in this selection';
+  const multiYr = new Set(series.map(x=>yearOf(x.m))).size > 1;
+  const axisLbl = m => multiYr ? monthShort(m)+" '"+m.slice(2,4) : monthShort(m);
   mkChart('chMonthly',{
-    data:{labels:series.map(s=>monthShort(s.m)),
+    data:{labels:series.map(s=>axisLbl(s.m)),
       datasets:[
         {type:'bar',label:'Asset Revenue (RCM)',data:series.map(s=>Math.round(s.aRev)),
           backgroundColor:'rgba(166,166,173,.45)',borderRadius:4,stack:'r',yAxisID:'y',order:3},
@@ -1009,7 +1058,7 @@ function renderOverall(){
   const parts=[];
   if(state.cust!=='All') parts.push('Customer: '+state.cust);
   if(state.type!=='All') parts.push('Type: '+(state.type==='RCM'?'Asset':'Brokered'));
-  if(state.month!=='All') parts.push('Month: '+monthLabel(state.month));
+  if(MONTHS_SEL.size) parts.push('Period: '+periodLabel());
   if(state.status!=='All') parts.push('Completed only');
   $('#scopeNote').textContent = parts.length ? 'Filtered — '+parts.join(' · ') : 'Showing all shipments in the selected scope';
 }
@@ -1121,6 +1170,97 @@ function renderScopeBar(){
    A shipment counts as new business when its customer is in this group AND the
    row passes the New Lanes test (r.ln) — which only restricts BlueTriton and
    Pepsi. Changes last for the session; reload returns to the seeded list. */
+/* ---------- Period picker: years that expand into months ----------
+   MONTHS_SEL holds 'YYYY-MM' strings; empty means every period. Ticking a year
+   ticks all of its months, so "2025" and "every month of 2025" are the same
+   selection and the charts redraw to that span either way. */
+const yearOf = m => m.slice(0,4);
+function yearsInData(){
+  const out = {};
+  (DATA ? DATA.months : CACHE.months).forEach(m => (out[yearOf(m)] = out[yearOf(m)] || []).push(m));
+  return out;
+}
+function periodLabel(){
+  if(!MONTHS_SEL.size) return 'All periods';
+  const yrs = yearsInData();
+  const picked = [...MONTHS_SEL].sort();
+  const whole = Object.keys(yrs).filter(y => yrs[y].every(m => MONTHS_SEL.has(m)));
+  const covered = whole.reduce((n,y) => n + yrs[y].length, 0);
+  if(whole.length && covered === picked.length)
+    return whole.length === 1 ? whole[0] : whole.join(', ');
+  if(picked.length === 1) return monthLabel(picked[0]);
+  const sameYear = yearOf(picked[0]) === yearOf(picked[picked.length-1]);
+  if(picked.length <= 3 || !sameYear) return picked.length + ' months';
+  return monthShort(picked[0]) + '\u2013' + monthLabel(picked[picked.length-1]);
+}
+function renderPeriodPicker(){
+  const yrs = yearsInData();
+  const years = Object.keys(yrs).sort();
+  $('#msTree').innerHTML = years.map(y => {
+    const ms = yrs[y];
+    const on = ms.filter(m => MONTHS_SEL.has(m)).length;
+    const open = OPEN_YEARS.has(y);
+    return `<div class="ms-yr${open?' open':''}" data-yr="${y}">
+        <span class="ms-car">\u25B8</span>
+        <input type="checkbox" data-yrbox="${y}"${on===ms.length?' checked':''}
+               ${on&&on<ms.length?' data-partial="1"':''}>
+        <span>${y}</span><span class="cnt">${on?on+'/':''}${ms.length}</span>
+      </div>
+      <div class="ms-mo">${ms.map(m=>`
+        <label><input type="checkbox" data-mo="${m}"${MONTHS_SEL.has(m)?' checked':''}>
+        ${monthLabel(m)}</label>`).join('')}</div>`;
+  }).join('') || '<p class="ms-mo" style="display:block;color:var(--silver-faint);font-size:12px">No dated shipments.</p>';
+  $('#msTree').querySelectorAll('input[data-partial]').forEach(b => b.indeterminate = true);
+  const btn = $('#msBtn');
+  btn.textContent = periodLabel();
+  btn.classList.toggle('on', MONTHS_SEL.size > 0);
+}
+const OPEN_YEARS = new Set();
+document.addEventListener('click', e => {
+  const panel = $('#msPanel'), btn = $('#msBtn');
+  if(!panel) return;
+  if(e.target.closest('#msBtn')){
+    const hidden = panel.classList.toggle('hide');
+    btn.setAttribute('aria-expanded', String(!hidden));
+    if(!hidden && !OPEN_YEARS.size){                 // open the newest year by default
+      const years = Object.keys(yearsInData()).sort();
+      if(years.length) OPEN_YEARS.add(years[years.length-1]);
+      renderPeriodPicker();
+    }
+    return;
+  }
+  if(!e.target.closest('#msPanel')){ panel.classList.add('hide'); btn.setAttribute('aria-expanded','false'); }
+});
+document.addEventListener('change', e => {
+  const mo = e.target.closest('input[data-mo]');
+  if(mo){
+    if(mo.checked) MONTHS_SEL.add(mo.dataset.mo); else MONTHS_SEL.delete(mo.dataset.mo);
+    EXPANDED.clear(); renderPeriodPicker(); renderAll(); return;
+  }
+  const yb = e.target.closest('input[data-yrbox]');
+  if(yb){
+    const ms = yearsInData()[yb.dataset.yrbox] || [];
+    ms.forEach(m => yb.checked ? MONTHS_SEL.add(m) : MONTHS_SEL.delete(m));
+    EXPANDED.clear(); renderPeriodPicker(); renderAll();
+  }
+});
+document.addEventListener('click', e => {
+  const yr = e.target.closest('.ms-yr');
+  if(yr && !e.target.closest('input')){
+    const y = yr.dataset.yr;
+    if(OPEN_YEARS.has(y)) OPEN_YEARS.delete(y); else OPEN_YEARS.add(y);
+    renderPeriodPicker(); return;
+  }
+  const mini = e.target.closest('button[data-ms]');
+  if(!mini) return;
+  const yrs = yearsInData(), years = Object.keys(yrs).sort();
+  MONTHS_SEL.clear();
+  if(mini.dataset.ms === 'all') years.forEach(y => yrs[y].forEach(m => MONTHS_SEL.add(m)));
+  if(mini.dataset.ms === 'latest' && years.length)
+    yrs[years[years.length-1]].forEach(m => MONTHS_SEL.add(m));
+  EXPANDED.clear(); renderPeriodPicker(); renderAll();
+});
+
 const NEWSET = new Set(CACHE.newCustomers);
 const NEWSET_SEED = new Set(CACHE.newCustomers);
 const isNewRow = r => r.ln===1 && NEWSET.has(DATA.customers[r.c]);
@@ -1514,21 +1654,19 @@ function switchView(v){
 }
 $$('.tab').forEach(t=>t.addEventListener('click',()=>switchView(t.dataset.view)));
 
-['fType','fMonth','fStatus'].forEach(id=>{
+['fType','fStatus'].forEach(id=>{
   $('#'+id).addEventListener('change', e=>{
-    const map={fType:'type',fMonth:'month',fStatus:'status'};
+    const map={fType:'type',fStatus:'status'};
     state[map[id]] = e.target.value;
     EXPANDED.clear();
     renderAll();
   });
 });
 $('#resetBtn').addEventListener('click', ()=>{
-  state.type='All'; state.month='All'; state.status='All';
+  state.type='All'; state.status='All'; MONTHS_SEL.clear();
   EXPANDED.clear(); SELECTED.clear();
   DATA.customers.forEach((c,i)=>{ if(state.biz==='all' || NEWSET.has(c)) SELECTED.add(i); });
-  $('#fType').value='All'; $('#fStatus').value='All';
-  state.breakdown='month'; state.drillCust='All';
-  $('#fBreak').value='month';
+  $('#fType').value='All'; $('#fStatus').value='All'; renderPeriodPicker();
   buildOptions(); renderAll();
 });
 $('#exportBtn').addEventListener('click', ()=>{
